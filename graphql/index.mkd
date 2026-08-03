@@ -1,0 +1,6 @@
+# Graphql
+* graphql only accepts post query 
+  * we can use 
+
+  
+

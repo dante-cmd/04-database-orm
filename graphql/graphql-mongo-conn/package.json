@@ -1,0 +1,20 @@
+{
+  "name": "graphql-mongo-conn",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@apollo/server": "^4.1.1",
+    "express": "^4.18.2",
+    "graphql": "^16.6.0",
+    "mongoose": "^6.7.1",
+    "nodemon": "^2.0.20"
+  }
+}
