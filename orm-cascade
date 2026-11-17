@@ -1,0 +1,335 @@
+In SQLAlchemy, `merge`, `refresh-expire`, and `expunge` are three ORM cascade options that control how **session operations propagate from a parent object to its related objects**.
+
+They are less frequently used explicitly than `save-update` and `delete`, but they are important when working with detached objects, session lifecycle management, and database synchronization.
+
+Let's use the same example throughout:
+
+```
+class User(Base):    __tablename__ = "users"    id: Mapped[int] = mapped_column(primary_key=True)    posts: Mapped[list["Post"]] = relationship(        back_populates="user",        cascade="all, delete-orphan"    )class Post(Base):    __tablename__ = "posts"    id: Mapped[int] = mapped_column(primary_key=True)    user_id: Mapped[int] = mapped_column(        ForeignKey("users.id")    )    user: Mapped["User"] = relationship(        back_populates="posts"    )
+```
+
+## **1.&#x20;**`merge`
+
+**Purpose:** Copy the state of an object into another object associated with the current session.
+
+This is particularly useful when you have an object that was created or modified outside your current SQLAlchemy session.
+
+### **Understanding the problem**
+
+Imagine that you retrieve a user:
+
+```
+user = session1.get(User, 1)user.posts[0].title = "Updated title"session1.close()
+```
+
+After closing the session, `user` becomes detached.
+
+**Session 1**
+
+User persistent
+
+**Session closed**
+
+User detached
+
+The Python object still exists, but it is no longer associated with a session.
+
+You cannot simply use this detached object as though it were persistent in another session.
+
+### **Solution:&#x20;**`session.merge()`
+
+```
+with Session(engine) as session2:    merged_user = session2.merge(user)    session2.commit()
+```
+
+What happens?
+
+1. SQLAlchemy identifies the database identity of `user`.
+2. It retrieves or locates the corresponding object in `session2`.
+3. It copies the state from the detached object into that session-associated object.
+4. It returns the session-associated object.
+
+**Important:** `merge()` does not attach the original object to the new session. It returns a different Python object (or an existing identity-mapped object).
+
+```
+print(user is merged_user)# False
+```
+
+### **What does&#x20;**`cascade="merge"`**&#x20;do?**
+
+Suppose you have:
+
+```
+cascade="save-update, merge"
+```
+
+When you execute:
+
+```
+merged_user = session2.merge(user)
+```
+
+SQLAlchemy also merges the associated posts.
+
+Without the `merge` cascade, the related objects are not automatically merged through that relationship.
+
+**Merge propagation**
+
+**session.merge(user)**
+
+**User**
+
+Merged
+
+**Posts**
+
+Merged
+
+**When to use it:**
+
+- Transferring object state between sessions.
+- Working with detached ORM objects.
+- Receiving ORM objects from another layer of an application.
+
+## **2.&#x20;**`refresh-expire`
+
+**Purpose:** Propagate expiration and refresh operations from a parent object to its related objects.
+
+First, understand what expiration means.
+
+SQLAlchemy maintains an identity map and tracks object attributes in memory. Sometimes the in-memory values might no longer reflect the database.
+
+### **Understanding&#x20;**`expire()`
+
+Imagine this:
+
+```
+user = session.get(User, 1)print(user.name)# Dante
+```
+
+Another transaction updates the database:
+
+```
+UPDATE users
+SET name = 'Daniel'
+WHERE id = 1;
+```
+
+Your Python object might still contain:
+
+```
+user.name# Dante
+```
+
+The object has stale data.
+
+You can tell SQLAlchemy to expire its attributes:
+
+```
+session.expire(user)
+```
+
+Now, when you access:
+
+```
+print(user.name)
+```
+
+SQLAlchemy automatically executes a SELECT query to reload the expired attribute.
+
+```
+SELECT * FROM users WHERE id = 1;
+```
+
+The result is:
+
+```
+# Daniel
+```
+
+### **What does&#x20;**`cascade="refresh-expire"`**&#x20;do?**
+
+Suppose:
+
+```
+user = session.get(User, 1)posts = user.posts
+```
+
+Now execute:
+
+```
+session.expire(user)
+```
+
+With `refresh-expire` cascade, the expiration operation propagates to the related posts.
+
+Conceptually:
+
+**session.expire(user)**
+
+refresh-expire cascade
+
+**User**
+
+Expired
+
+**Posts**
+
+Expired
+
+When you subsequently access their attributes, SQLAlchemy can reload them from the database.
+
+### **What about&#x20;**`refresh()`**?**
+
+There are two related operations:
+
+```
+session.expire(user)
+```
+
+Marks attributes as expired. Data is loaded later, when accessed.
+
+```
+session.refresh(user)
+```
+
+Immediately reloads the object's attributes from the database.
+
+An interesting detail: `refresh-expire` propagates expiration, not necessarily an immediate refresh of every related object.
+
+**When to use it:**
+
+- When data may have been modified by external transactions.
+- When you need to invalidate stale ORM state.
+- When you want expiration behavior to propagate through relationships.
+
+## **3.&#x20;**`expunge`
+
+**Purpose:** Remove an object from the SQLAlchemy session.
+
+This is different from deleting a database record.
+
+Consider:
+
+```
+user = session.get(User, 1)
+```
+
+The user is currently persistent.
+
+Now execute:
+
+```
+session.expunge(user)
+```
+
+The user becomes detached.
+
+**User in Session**
+
+Persistent
+
+session.expunge(user)
+
+**User outside Session**
+
+Detached
+
+The object still exists in Python memory, but SQLAlchemy no longer tracks it in that session.
+
+### **What does&#x20;**`cascade="expunge"`**&#x20;do?**
+
+Imagine:
+
+```
+user = session.get(User, 1)posts = user.postssession.expunge(user)
+```
+
+With `expunge` cascade:
+
+- User is removed from the session.
+- Associated posts are also removed from the session.
+
+Without `expunge` cascade, the posts remain associated with the session.
+
+### `expunge()`**&#x20;vs.&#x20;**`delete()`
+
+This distinction is critical:
+
+| Operation                 | `expunge()`           | `delete()`           |
+| ------------------------- | --------------------- | -------------------- |
+| Removes from session      | Yes                   | Not immediately      |
+| Deletes database record   | No                    | Yes, on flush        |
+| Changes object state      | Persistent → Detached | Persistent → Deleted |
+| Can still exist in Python | Yes                   | Yes                  |
+
+Example:
+
+```
+session.expunge(user)
+```
+
+The user still exists in the database.
+
+But:
+
+```
+session.delete(user)session.commit()
+```
+
+The user is deleted from the database (subject to the configured relationship and database constraints).
+
+**When to use it:**
+
+- Detaching objects from a session.
+- Controlling session memory and identity-map contents.
+- Preparing objects to be used independently of the current session.
+
+## **4. Comparison of all three**
+
+| Cascade          | Triggering operation      | Effect on children  |
+| ---------------- | ------------------------- | ------------------- |
+| `merge`          | `session.merge(parent)`   | Merges child state  |
+| `refresh-expire` | `session.expire(parent)`  | Expires child state |
+| `expunge`        | `session.expunge(parent)` | Detaches children   |
+
+A practical way to remember them:
+
+- **Merge:** Copy object state into another session.
+- **Refresh-expire:** Invalidate potentially stale in-memory data.
+- **Expunge:** Disconnect objects from the session.
+
+## **5. How they fit into&#x20;**`cascade="all"`
+
+Recall:
+
+```
+cascade="all, delete-orphan"
+```
+
+`all` includes:
+
+```
+cascade=(    "save-update, "    "merge, "    "refresh-expire, "    "expunge, "    "delete")
+```
+
+One important consideration: `all` includes `refresh-expire`. This can be undesirable in some asynchronous SQLAlchemy applications because accessing expired attributes may require implicit database I/O, which is problematic with `AsyncSession`.
+
+For that reason, asynchronous applications sometimes explicitly configure:
+
+```
+cascade="save-update, merge, delete, delete-orphan"
+```
+
+This retains the commonly needed lifecycle behavior without `refresh-expire` or `expunge`.
+
+## **6. Official documentation**
+
+For deeper understanding:
+
+- [Merging — SQLAlchemy](https://docs.sqlalchemy.org/en/20/orm/session_state_management.html?utm_source=chatgpt.com#merging)
+- [Refreshing / Expiring](https://docs.sqlalchemy.org/en/20/orm/session_state_management.html?utm_source=chatgpt.com#refreshing-expiring)
+- [Expunging](https://docs.sqlalchemy.org/en/20/orm/session_state_management.html?utm_source=chatgpt.com#expunging)
+- [ORM Cascades](https://docs.sqlalchemy.org/en/20/orm/cascades.html?utm_source=chatgpt.com)
+
+**My recommendation:** Understand `merge` particularly well if your application uses multiple sessions or separates data extraction, transformation, and persistence into different application layers. `refresh-expire` and `expunge` are more specialized session-management tools.
